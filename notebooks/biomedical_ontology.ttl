@@ -1,0 +1,514 @@
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix bio:  <http://www.unal.edu.co/biomed#> .
+@prefix dc:   <http://purl.org/dc/elements/1.1/> .
+
+# ============================================================
+#  Ontología Biomédica — Trabajo Práctico 2
+#  Ingeniería Ontológica 3010090 — Universidad Nacional de Colombia
+#  Dominio: Bioinformática y Medicina (artículos arXiv)
+# ============================================================
+
+bio: a owl:Ontology ;
+    dc:title "Ontología Biomédica para Knowledge Graph RAG" ;
+    dc:description "Ontología de dominio biomédico para el sistema KG-RAG de la Práctica 2" ;
+    dc:creator "Equipo RAG — Ingeniería Ontológica" ;
+    owl:versionInfo "1.0" .
+
+# ============================================================
+#  CLASES (12 clases)
+# ============================================================
+
+bio:BiomedicalDocument a owl:Class ;
+    rdfs:label "Documento Biomédico"@es ;
+    rdfs:comment "Clase base para todos los documentos del dominio biomédico." .
+
+bio:ResearchArticle a owl:Class ;
+    rdfs:subClassOf bio:BiomedicalDocument ;
+    rdfs:label "Artículo de Investigación"@es ;
+    rdfs:comment "Artículo científico original que reporta resultados de investigación." .
+
+bio:ClinicalStudy a owl:Class ;
+    rdfs:subClassOf bio:BiomedicalDocument ;
+    rdfs:label "Estudio Clínico"@es ;
+    rdfs:comment "Estudio que involucra participantes humanos para evaluar intervenciones médicas." ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty bio:studiesDisease ;
+        owl:someValuesFrom bio:Disease     # Restricción existencial: todo estudio clínico estudia al menos una enfermedad
+    ] .
+
+bio:SystematicReview a owl:Class ;
+    rdfs:subClassOf bio:BiomedicalDocument ;
+    rdfs:label "Revisión Sistemática"@es ;
+    rdfs:comment "Revisión exhaustiva y reproducible de la literatura científica." ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty bio:hasCitationCount ;
+        owl:minCardinality 5              # Restricción de cardinalidad: mínimo 5 citas
+    ] .
+
+# Constructor lógico: unionOf — BiomedicalPublication es ResearchArticle OR ClinicalStudy OR SystematicReview
+bio:BiomedicalPublication a owl:Class ;
+    rdfs:label "Publicación Biomédica"@es ;
+    owl:equivalentClass [
+        a owl:Class ;
+        owl:unionOf ( bio:ResearchArticle bio:ClinicalStudy bio:SystematicReview )
+    ] .
+
+bio:Gene a owl:Class ;
+    rdfs:label "Gen"@es ;
+    rdfs:comment "Unidad funcional de la herencia; secuencia de ADN que codifica una proteína." .
+
+bio:Protein a owl:Class ;
+    rdfs:label "Proteína"@es ;
+    rdfs:comment "Macromolécula formada por aminoácidos codificada por un gen." .
+
+bio:Disease a owl:Class ;
+    rdfs:label "Enfermedad"@es ;
+    rdfs:comment "Condición anormal que afecta la estructura o función del organismo." .
+
+bio:InfectiousDisease a owl:Class ;
+    rdfs:subClassOf bio:Disease ;
+    rdfs:label "Enfermedad Infecciosa"@es ;
+    rdfs:comment "Enfermedad causada por agentes patógenos transmisibles." .
+
+bio:ChronicDisease a owl:Class ;
+    rdfs:subClassOf bio:Disease ;
+    rdfs:label "Enfermedad Crónica"@es ;
+    rdfs:comment "Enfermedad de larga duración con progresión lenta." .
+
+bio:Drug a owl:Class ;
+    rdfs:label "Fármaco"@es ;
+    rdfs:comment "Sustancia química utilizada para tratar, curar o prevenir enfermedades." ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty bio:treats ;
+        owl:allValuesFrom bio:Disease     # Restricción universal: un fármaco solo puede tratar enfermedades
+    ] .
+
+bio:Treatment a owl:Class ;
+    rdfs:label "Tratamiento"@es ;
+    rdfs:comment "Procedimiento médico o intervención aplicada a una enfermedad." .
+
+bio:Author a owl:Class ;
+    rdfs:label "Autor"@es ;
+    rdfs:comment "Persona que ha escrito o contribuido a un documento biomédico." .
+
+bio:Institution a owl:Class ;
+    rdfs:label "Institución"@es ;
+    rdfs:comment "Organización académica, hospitalaria o de investigación." .
+
+bio:BiologicalProcess a owl:Class ;
+    rdfs:label "Proceso Biológico"@es ;
+    rdfs:comment "Proceso molecular o celular que ocurre en organismos vivos." .
+
+# ============================================================
+#  CLASES DISJUNTAS (2 casos)
+# ============================================================
+
+# Caso 1: Gene y Protein son disjuntos
+[] a owl:AllDisjointClasses ;
+    owl:members ( bio:Gene bio:Protein ) .
+
+# Caso 2: Drug y Disease son disjuntos
+[] a owl:AllDisjointClasses ;
+    owl:members ( bio:Drug bio:Disease ) .
+
+# ============================================================
+#  PROPIEDADES DE OBJETO (10+ propiedades con dominio y rango)
+# ============================================================
+
+bio:hasAuthor a owl:ObjectProperty ;
+    rdfs:label "tiene autor"@es ;
+    rdfs:domain bio:BiomedicalDocument ;
+    rdfs:range  bio:Author ;
+    rdfs:comment "Relaciona un documento con su(s) autor(es)." .
+
+bio:isAuthoredBy a owl:ObjectProperty ;
+    rdfs:label "es autoría de"@es ;
+    rdfs:domain bio:Author ;
+    rdfs:range  bio:BiomedicalDocument ;
+    owl:inverseOf bio:hasAuthor ;          # inverseOf #1
+    rdfs:comment "Relación inversa de hasAuthor." .
+
+bio:studiesDisease a owl:ObjectProperty ;
+    rdfs:label "estudia enfermedad"@es ;
+    rdfs:domain bio:BiomedicalDocument ;
+    rdfs:range  bio:Disease ;
+    rdfs:comment "El documento investiga una enfermedad específica." .
+
+bio:isDiseaseStudiedIn a owl:ObjectProperty ;
+    rdfs:label "enfermedad estudiada en"@es ;
+    rdfs:domain bio:Disease ;
+    rdfs:range  bio:BiomedicalDocument ;
+    owl:inverseOf bio:studiesDisease ;     # inverseOf #2
+    rdfs:comment "Relación inversa de studiesDisease." .
+
+bio:encodes a owl:ObjectProperty ;
+    rdfs:label "codifica"@es ;
+    rdfs:domain bio:Gene ;
+    rdfs:range  bio:Protein ;
+    rdfs:comment "Un gen codifica una proteína." .
+
+bio:isEncodedBy a owl:ObjectProperty ;
+    rdfs:label "es codificado por"@es ;
+    rdfs:domain bio:Protein ;
+    rdfs:range  bio:Gene ;
+    owl:inverseOf bio:encodes ;            # Se incluye como tercera inversa para completitud
+    rdfs:comment "Relación inversa de encodes." .
+
+bio:treats a owl:ObjectProperty ;
+    rdfs:label "trata"@es ;
+    rdfs:domain bio:Drug ;
+    rdfs:range  bio:Disease ;
+    rdfs:comment "Un fármaco trata una enfermedad." .
+
+bio:isTreatedBy a owl:ObjectProperty ;
+    rdfs:label "es tratado por"@es ;
+    rdfs:domain bio:Disease ;
+    rdfs:range  bio:Drug ;
+    owl:inverseOf bio:treats ;
+    rdfs:comment "Relación inversa de treats." .
+
+bio:affiliatedWith a owl:ObjectProperty ;
+    rdfs:label "afiliado con"@es ;
+    rdfs:domain bio:Author ;
+    rdfs:range  bio:Institution ;
+    rdfs:comment "Un autor pertenece a una institución académica." .
+
+bio:participatesIn a owl:ObjectProperty ;
+    rdfs:label "participa en"@es ;
+    rdfs:domain bio:Gene ;
+    rdfs:range  bio:BiologicalProcess ;
+    rdfs:comment "Un gen participa en un proceso biológico." .
+
+bio:involvedIn a owl:ObjectProperty ;
+    rdfs:label "involucrado en"@es ;
+    rdfs:domain bio:Protein ;
+    rdfs:range  bio:BiologicalProcess ;
+    rdfs:comment "Una proteína está involucrada en un proceso biológico." .
+
+bio:usedIn a owl:ObjectProperty ;
+    rdfs:label "usado en"@es ;
+    rdfs:domain bio:Drug ;
+    rdfs:range  bio:Treatment ;
+    rdfs:comment "Un fármaco se utiliza en un tratamiento." .
+
+# ============================================================
+#  JERARQUÍAS DE PROPIEDADES (2 casos rdfs:subPropertyOf)
+# ============================================================
+
+bio:isDirectlyEncodedBy a owl:ObjectProperty ;
+    rdfs:subPropertyOf bio:isEncodedBy ;
+    rdfs:label "es directamente codificado por"@es ;
+    rdfs:comment "Subpropiedad de isEncodedBy: codificación directa sin splicing." .
+
+bio:primaryTreats a owl:ObjectProperty ;
+    rdfs:subPropertyOf bio:treats ;
+    rdfs:label "trata primariamente"@es ;
+    rdfs:comment "Subpropiedad de treats: tratamiento de primera línea para la enfermedad." .
+
+# ============================================================
+#  PROPIEDADES DE DATOS (con rango XMLSchema)
+# ============================================================
+
+bio:hasKeyword a owl:DatatypeProperty ;
+    rdfs:label "tiene palabra clave"@es ;
+    rdfs:domain bio:BiomedicalDocument ;
+    rdfs:range  xsd:string ;
+    rdfs:comment "Palabra clave o etiqueta descriptiva del documento." .
+
+bio:hasPublicationYear a owl:DatatypeProperty ;
+    rdfs:label "año de publicación"@es ;
+    rdfs:domain bio:BiomedicalDocument ;
+    rdfs:range  xsd:integer ;
+    rdfs:comment "Año en que fue publicado el documento." .
+
+bio:hasCitationCount a owl:DatatypeProperty ;
+    rdfs:label "número de citas"@es ;
+    rdfs:domain bio:BiomedicalDocument ;
+    rdfs:range  xsd:integer ;
+    rdfs:comment "Número de veces que el documento ha sido citado." .
+
+bio:hasAbstract a owl:DatatypeProperty ;
+    rdfs:label "tiene resumen"@es ;
+    rdfs:domain bio:BiomedicalDocument ;
+    rdfs:range  xsd:string ;
+    rdfs:comment "Resumen o abstract del documento." .
+
+bio:hasGeneSymbol a owl:DatatypeProperty ;
+    rdfs:label "símbolo del gen"@es ;
+    rdfs:domain bio:Gene ;
+    rdfs:range  xsd:string ;
+    rdfs:comment "Símbolo oficial del gen (ej. BRCA1, TP53)." .
+
+bio:hasMolecularWeight a owl:DatatypeProperty ;
+    rdfs:label "peso molecular"@es ;
+    rdfs:domain bio:Protein ;
+    rdfs:range  xsd:float ;
+    rdfs:comment "Peso molecular de la proteína en kDa." .
+
+bio:hasICD10Code a owl:DatatypeProperty ;
+    rdfs:label "código ICD-10"@es ;
+    rdfs:domain bio:Disease ;
+    rdfs:range  xsd:string ;
+    rdfs:comment "Código de clasificación ICD-10 de la enfermedad." .
+
+bio:hasDrugBankID a owl:DatatypeProperty ;
+    rdfs:label "ID DrugBank"@es ;
+    rdfs:domain bio:Drug ;
+    rdfs:range  xsd:string ;
+    rdfs:comment "Identificador único del fármaco en la base de datos DrugBank." .
+
+# ============================================================
+#  INDIVIDUOS — GENES (5 individuos)
+# ============================================================
+
+bio:BRCA1 a owl:NamedIndividual, bio:Gene ;
+    rdfs:label "BRCA1"@en ;
+    bio:hasGeneSymbol "BRCA1" ;
+    bio:participatesIn bio:DNARepair ;
+    rdfs:comment "Gen supresor de tumores asociado al cáncer de mama y ovario." .
+
+bio:TP53 a owl:NamedIndividual, bio:Gene ;
+    rdfs:label "TP53"@en ;
+    bio:hasGeneSymbol "TP53" ;
+    bio:participatesIn bio:Apoptosis ;
+    rdfs:comment "Gen supresor de tumores más frecuentemente mutado en cáncer humano." .
+
+bio:EGFR a owl:NamedIndividual, bio:Gene ;
+    rdfs:label "EGFR"@en ;
+    bio:hasGeneSymbol "EGFR" ;
+    bio:participatesIn bio:CellProliferation ;
+    rdfs:comment "Receptor del factor de crecimiento epidérmico; mutado en cáncer de pulmón." .
+
+bio:HER2 a owl:NamedIndividual, bio:Gene ;
+    rdfs:label "HER2"@en ;
+    bio:hasGeneSymbol "HER2" ;
+    bio:participatesIn bio:CellDivision ;
+    rdfs:comment "Receptor tirosina quinasa sobreexpresado en cáncer de mama agresivo." .
+
+bio:KRAS a owl:NamedIndividual, bio:Gene ;
+    rdfs:label "KRAS"@en ;
+    bio:hasGeneSymbol "KRAS" ;
+    bio:participatesIn bio:CellProliferation ;
+    rdfs:comment "Oncogén RAS con mutaciones comunes en cáncer pancreático y colorrectal." .
+
+# ============================================================
+#  INDIVIDUOS — PROTEÍNAS (4 individuos)
+# ============================================================
+
+bio:p53_protein a owl:NamedIndividual, bio:Protein ;
+    rdfs:label "p53"@en ;
+    bio:isEncodedBy bio:TP53 ;
+    bio:hasMolecularWeight 43.7 ;
+    bio:involvedIn bio:Apoptosis ;
+    rdfs:comment "Proteína supresora de tumores codificada por el gen TP53." .
+
+bio:BRCA1_protein a owl:NamedIndividual, bio:Protein ;
+    rdfs:label "BRCA1 protein"@en ;
+    bio:isEncodedBy bio:BRCA1 ;
+    bio:hasMolecularWeight 207.7 ;
+    bio:involvedIn bio:DNARepair ;
+    rdfs:comment "Proteína de reparación de ADN codificada por BRCA1." .
+
+bio:EGFR_protein a owl:NamedIndividual, bio:Protein ;
+    rdfs:label "EGFR protein"@en ;
+    bio:isEncodedBy bio:EGFR ;
+    bio:hasMolecularWeight 134.2 ;
+    bio:involvedIn bio:CellProliferation ;
+    rdfs:comment "Receptor del factor de crecimiento epidérmico." .
+
+bio:HER2_protein a owl:NamedIndividual, bio:Protein ;
+    rdfs:label "HER2 protein"@en ;
+    bio:isEncodedBy bio:HER2 ;
+    bio:hasMolecularWeight 138.0 ;
+    bio:involvedIn bio:CellDivision ;
+    rdfs:comment "Proteína receptora HER2 sobreexpresada en cáncer de mama." .
+
+# ============================================================
+#  INDIVIDUOS — ENFERMEDADES (4 individuos)
+# ============================================================
+
+bio:BreastCancer a owl:NamedIndividual, bio:ChronicDisease ;
+    rdfs:label "Cáncer de Mama"@es ;
+    bio:hasICD10Code "C50" ;
+    bio:isTreatedBy bio:Trastuzumab ;
+    rdfs:comment "Neoplasia maligna originada en el tejido mamario." .
+
+bio:LungCancer a owl:NamedIndividual, bio:ChronicDisease ;
+    rdfs:label "Cáncer de Pulmón"@es ;
+    bio:hasICD10Code "C34" ;
+    bio:isTreatedBy bio:Gefitinib ;
+    rdfs:comment "Neoplasia maligna del parénquima pulmonar." .
+
+bio:COVID19 a owl:NamedIndividual, bio:InfectiousDisease ;
+    rdfs:label "COVID-19"@es ;
+    bio:hasICD10Code "U07.1" ;
+    bio:isTreatedBy bio:Remdesivir ;
+    rdfs:comment "Enfermedad respiratoria causada por el coronavirus SARS-CoV-2." .
+
+bio:AlzheimersDisease a owl:NamedIndividual, bio:ChronicDisease ;
+    rdfs:label "Enfermedad de Alzheimer"@es ;
+    bio:hasICD10Code "G30" ;
+    rdfs:comment "Enfermedad neurodegenerativa progresiva que afecta la memoria." .
+
+bio:Diabetes a owl:NamedIndividual, bio:ChronicDisease ;
+    rdfs:label "Diabetes Mellitus"@es ;
+    bio:hasICD10Code "E11" ;
+    bio:isTreatedBy bio:Metformin ;
+    rdfs:comment "Enfermedad metabólica caracterizada por hiperglucemia crónica." .
+
+bio:Influenza a owl:NamedIndividual, bio:InfectiousDisease ;
+    rdfs:label "Influenza"@es ;
+    bio:hasICD10Code "J10" ;
+    rdfs:comment "Infección viral aguda de las vías respiratorias causada por el virus influenza." .
+
+# ============================================================
+#  INDIVIDUOS — FÁRMACOS (5 individuos)
+# ============================================================
+
+bio:Trastuzumab a owl:NamedIndividual, bio:Drug ;
+    rdfs:label "Trastuzumab"@en ;
+    bio:hasDrugBankID "DB00072" ;
+    bio:treats bio:BreastCancer ;
+    rdfs:comment "Anticuerpo monoclonal que bloquea HER2; tratamiento del cáncer de mama HER2+." .
+
+bio:Metformin a owl:NamedIndividual, bio:Drug ;
+    rdfs:label "Metformin"@en ;
+    bio:hasDrugBankID "DB00331" ;
+    bio:treats bio:Diabetes ;
+    rdfs:comment "Biguanida usada como primera línea en diabetes tipo 2." .
+
+bio:Remdesivir a owl:NamedIndividual, bio:Drug ;
+    rdfs:label "Remdesivir"@en ;
+    bio:hasDrugBankID "DB14761" ;
+    bio:treats bio:COVID19 ;
+    rdfs:comment "Antiviral análogo de nucleótido; aprobado para COVID-19 hospitalizado." .
+
+bio:Gefitinib a owl:NamedIndividual, bio:Drug ;
+    rdfs:label "Gefitinib"@en ;
+    bio:hasDrugBankID "DB00317" ;
+    bio:treats bio:LungCancer ;
+    rdfs:comment "Inhibidor de la tirosina quinasa del EGFR para cáncer de pulmón EGFR+." .
+
+bio:Ibuprofen a owl:NamedIndividual, bio:Drug ;
+    rdfs:label "Ibuprofeno"@es ;
+    bio:hasDrugBankID "DB01050" ;
+    rdfs:comment "Antiinflamatorio no esteroideo (AINE) de uso general." .
+
+# ============================================================
+#  INDIVIDUOS — AUTORES (4 individuos)
+# ============================================================
+
+bio:JohnSmith a owl:NamedIndividual, bio:Author ;
+    rdfs:label "John Smith"@en ;
+    bio:affiliatedWith bio:HarvardMedical ;
+    rdfs:comment "Investigador principal en oncología molecular." .
+
+bio:MaryJohnson a owl:NamedIndividual, bio:Author ;
+    rdfs:label "Mary Johnson"@en ;
+    bio:affiliatedWith bio:StanfordUniversity ;
+    rdfs:comment "Especialista en bioinformática y genómica computacional." .
+
+bio:DavidLee a owl:NamedIndividual, bio:Author ;
+    rdfs:label "David Lee"@en ;
+    bio:affiliatedWith bio:NIH ;
+    rdfs:comment "Investigador en enfermedades infecciosas y virología." .
+
+bio:SarahBrown a owl:NamedIndividual, bio:Author ;
+    rdfs:label "Sarah Brown"@en ;
+    bio:affiliatedWith bio:WHO ;
+    rdfs:comment "Epidemióloga en salud pública global." .
+
+# ============================================================
+#  INDIVIDUOS — INSTITUCIONES (4 individuos)
+# ============================================================
+
+bio:HarvardMedical a owl:NamedIndividual, bio:Institution ;
+    rdfs:label "Harvard Medical School"@en ;
+    rdfs:comment "Escuela de medicina de la Universidad de Harvard." .
+
+bio:StanfordUniversity a owl:NamedIndividual, bio:Institution ;
+    rdfs:label "Stanford University"@en ;
+    rdfs:comment "Universidad de Stanford, California." .
+
+bio:NIH a owl:NamedIndividual, bio:Institution ;
+    rdfs:label "National Institutes of Health"@en ;
+    rdfs:comment "Agencia de investigación biomédica de los Estados Unidos." .
+
+bio:WHO a owl:NamedIndividual, bio:Institution ;
+    rdfs:label "World Health Organization"@en ;
+    rdfs:comment "Organización Mundial de la Salud." .
+
+# ============================================================
+#  INDIVIDUOS — PROCESOS BIOLÓGICOS (4 individuos)
+# ============================================================
+
+bio:DNARepair a owl:NamedIndividual, bio:BiologicalProcess ;
+    rdfs:label "Reparación del ADN"@es ;
+    rdfs:comment "Proceso celular de corrección de daños en la molécula de ADN." .
+
+bio:Apoptosis a owl:NamedIndividual, bio:BiologicalProcess ;
+    rdfs:label "Apoptosis"@es ;
+    rdfs:comment "Proceso de muerte celular programada." .
+
+bio:CellDivision a owl:NamedIndividual, bio:BiologicalProcess ;
+    rdfs:label "División Celular"@es ;
+    rdfs:comment "Proceso por el que una célula se divide en dos células hijas." .
+
+bio:CellProliferation a owl:NamedIndividual, bio:BiologicalProcess ;
+    rdfs:label "Proliferación Celular"@es ;
+    rdfs:comment "Aumento del número de células mediante división celular controlada." .
+
+bio:Inflammation a owl:NamedIndividual, bio:BiologicalProcess ;
+    rdfs:label "Inflamación"@es ;
+    rdfs:comment "Respuesta protectora del sistema inmune ante infecciones o daños." .
+
+# ============================================================
+#  INDIVIDUOS — ARTÍCULOS (4 individuos ejemplo)
+# ============================================================
+
+bio:Article_BRCA1_2023 a owl:NamedIndividual, bio:ResearchArticle ;
+    rdfs:label "BRCA1 mutation analysis in breast cancer 2023"@en ;
+    bio:hasAuthor bio:JohnSmith ;
+    bio:hasAuthor bio:MaryJohnson ;
+    bio:studiesDisease bio:BreastCancer ;
+    bio:hasPublicationYear 2023 ;
+    bio:hasCitationCount 45 ;
+    bio:hasKeyword "BRCA1" ;
+    bio:hasKeyword "breast cancer" ;
+    bio:hasKeyword "genomics" .
+
+bio:Article_COVID19_Treatment_2022 a owl:NamedIndividual, bio:ClinicalStudy ;
+    rdfs:label "Remdesivir efficacy in COVID-19 clinical trial 2022"@en ;
+    bio:hasAuthor bio:DavidLee ;
+    bio:studiesDisease bio:COVID19 ;
+    bio:hasPublicationYear 2022 ;
+    bio:hasCitationCount 120 ;
+    bio:hasKeyword "COVID-19" ;
+    bio:hasKeyword "Remdesivir" ;
+    bio:hasKeyword "antiviral" .
+
+bio:Article_Alzheimer_Review_2024 a owl:NamedIndividual, bio:SystematicReview ;
+    rdfs:label "Systematic review on Alzheimer biomarkers 2024"@en ;
+    bio:hasAuthor bio:SarahBrown ;
+    bio:studiesDisease bio:AlzheimersDisease ;
+    bio:hasPublicationYear 2024 ;
+    bio:hasCitationCount 88 ;
+    bio:hasKeyword "Alzheimer" ;
+    bio:hasKeyword "biomarkers" ;
+    bio:hasKeyword "neurodegeneration" .
+
+bio:Article_EGFR_LungCancer_2023 a owl:NamedIndividual, bio:ResearchArticle ;
+    rdfs:label "EGFR targeted therapy in non-small cell lung cancer 2023"@en ;
+    bio:hasAuthor bio:MaryJohnson ;
+    bio:studiesDisease bio:LungCancer ;
+    bio:hasPublicationYear 2023 ;
+    bio:hasCitationCount 67 ;
+    bio:hasKeyword "EGFR" ;
+    bio:hasKeyword "lung cancer" ;
+    bio:hasKeyword "targeted therapy" .

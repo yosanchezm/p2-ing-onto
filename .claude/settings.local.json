@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(py:*)",
+      "Bash(python -c ':*)",
+      "Bash(conda run:*)",
+      "Bash(python3 -c \"import fitz; doc = fitz.open\\('c:/Users/cesar/Desktop/RAG/Practica1.pdf'\\); text = ''.join\\([p.get_text\\(\\) for p in doc]\\); print\\(text[:5000]\\)\")",
+      "Read(//c/Users/cesar/miniconda3/**)",
+      "Read(//c/ProgramData/miniconda3/**)",
+      "Read(//c/Users/cesar/anaconda3/**)",
+      "Read(//c/Users/cesar/**)"
+    ]
+  }
+}
