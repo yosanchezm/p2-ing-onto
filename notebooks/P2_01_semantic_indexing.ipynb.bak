@@ -1,0 +1,161 @@
+{
+ "nbformat": 4,
+ "nbformat_minor": 5,
+ "metadata": {
+  "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+  "language_info": {"name": "python", "version": "3.10.0"},
+  "colab": {"provenance": [], "toc_visible": true}
+ },
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "md_title",
+   "metadata": {},
+   "source": "# P2-01 · Indexación con Chunking Semántico\n**Trabajo Práctico 2 — Ingeniería Ontológica 3010090**\n\nEste notebook implementa el **Chunking Semántico** usando `SemanticChunker` de LangChain\nEn lugar de dividir el texto por tamaño fijo, agrupa fragmentos por coherencia temática.\n\n## Diferencia clave vs Práctica 1\n| Práctica 1 | Práctica 2 |\n|---|---|\n| `RecursiveCharacterTextSplitter` (tamaño fijo) | `SemanticChunker` (por significado) |\n| Chunks de 1000 chars con 200 overlap | Chunks variables según coherencia semántica |\n| Rápido pero puede cortar ideas a la mitad | Preserva unidades semánticas completas |"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_setup",
+   "metadata": {},
+   "source": "## 0 · Instalación y configuración"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "install",
+   "metadata": {},
+   "outputs": [],
+   "source": "# Instalar dependencias adicionales para Práctica 2\n!pip install -q \\\n    langchain==0.3.14 \\\n    langchain-community==0.3.14 \\\n    langchain-google-genai==2.0.8 \\\n    langchain-experimental==0.3.4 \\\n    langchain-groq==0.2.3 \\\n    faiss-cpu==1.9.0 \\\n    arxiv==2.1.3 \\\n    pypdf==5.1.0 \\\n    sentence-transformers==3.3.1 \\\n    rdflib==7.1.1 \\\n    SPARQLWrapper==2.0.0\n\nprint('✅ Dependencias instaladas')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "setup_keys",
+   "metadata": {},
+   "outputs": [],
+   "source": "import os\nfrom google.colab import userdata\n\n# ── Claves API ────────────────────────────────────────────────────────────\nos.environ['GOOGLE_API_KEY']      = userdata.get('GOOGLE_API_KEY')\nos.environ['GROQ_API_KEY']        = userdata.get('GROQ_API_KEY')\nos.environ['LANGCHAIN_API_KEY']   = userdata.get('LANGCHAIN_API_KEY')\nos.environ['LANGCHAIN_TRACING_V2'] = 'true'\nos.environ['LANGCHAIN_PROJECT']   = 'RAG-KnowledgeGraph-P2'\nos.environ['TAVILY_API_KEY']      = userdata.get('TAVILY_API_KEY')  # para búsqueda web (fallback)\n\nprint('✅ Claves API configuradas')\nprint(f'   LangSmith project: {os.environ[\"LANGCHAIN_PROJECT\"]}')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "imports",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Imports principales ───────────────────────────────────────────────────\nimport json, pickle, time, hashlib\nfrom pathlib import Path\nfrom typing import List, Dict, Any\n\n# LangChain\nfrom langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI\nfrom langchain_groq import ChatGroq\nfrom langchain_experimental.text_splitter import SemanticChunker\nfrom langchain_community.vectorstores import FAISS\nfrom langchain.schema import Document\nfrom langchain_community.document_loaders import PyPDFLoader\n\nprint('✅ Imports completados')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_mount",
+   "metadata": {},
+   "source": "## 1 · Montar Drive y verificar corpus"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "mount_drive",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Montar Google Drive ───────────────────────────────────────────────────\nfrom google.colab import drive\ndrive.mount('/content/drive')\n\n# ── Rutas del proyecto ────────────────────────────────────────────────────\nBASE_DIR    = Path('/content/drive/MyDrive/RAG_P2')\nCORPUS_DIR  = BASE_DIR / 'corpus'         # PDFs del corpus (reutilizados de P1)\nINDEX_DIR   = BASE_DIR / 'indices_p2'     # Índices FAISS con chunking semántico\nINDEX_DIR.mkdir(parents=True, exist_ok=True)\n\n# Verificar corpus\npdfs = list(CORPUS_DIR.glob('*.pdf'))\nprint(f'✅ Corpus cargado: {len(pdfs)} documentos PDF')\nfor pdf in pdfs[:5]:\n    print(f'   • {pdf.name}')\nif len(pdfs) > 5:\n    print(f'   ... y {len(pdfs)-5} más')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_models",
+   "metadata": {},
+   "source": "## 2 · Inicializar modelos de embeddings"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "init_models",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Modelo de embeddings (Google text-embedding-004) ─────────────────────\n# Se usa el mismo modelo que en P1 para mantener compatibilidad\nembeddings_model = GoogleGenerativeAIEmbeddings(\n    model='models/text-embedding-004',\n    task_type='retrieval_document'\n)\n\nprint('✅ Modelo de embeddings inicializado: text-embedding-004')\n\n# Test rápido\ntest_emb = embeddings_model.embed_query('test biomédico')\nprint(f'   Dimensión del embedding: {len(test_emb)}')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_semantic_chunker",
+   "metadata": {},
+   "source": "## 3 · SemanticChunker — Chunking Semántico\n\nEl `SemanticChunker` divide el texto en chunks basándose en la **similitud semántica** entre frases consecutivas.\nCuando la similitud cae por debajo de un umbral, se considera un límite de chunk.\n\n### Estrategias de umbral disponibles:\n| Estrategia | Descripción |\n|---|---|\n| `percentile` | Umbral = percentil X de las distancias |\n| `standard_deviation` | Umbral = media + N * desviación estándar |\n| `interquartile` | Umbral basado en rango intercuartílico |"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "semantic_chunker",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Configurar SemanticChunker ────────────────────────────────────────────\n# breakpoint_threshold_type='percentile': divide donde la distancia semántica\n# entre frases consecutivas supera el percentil 95\nsemantic_chunker = SemanticChunker(\n    embeddings=embeddings_model,\n    breakpoint_threshold_type='percentile',   # estrategia de umbral\n    breakpoint_threshold_amount=95            # percentil 95 → chunks más grandes y coherentes\n)\n\nprint('✅ SemanticChunker configurado')\nprint('   Estrategia: percentile (95)')\nprint('   Comportamiento: divide el texto cuando hay un salto semántico significativo')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_load_docs",
+   "metadata": {},
+   "source": "## 4 · Cargar y procesar documentos"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "load_documents",
+   "metadata": {},
+   "outputs": [],
+   "source": "def load_and_chunk_document(pdf_path: Path, chunker: SemanticChunker) -> List[Document]:\n    \"\"\"Carga un PDF y lo divide en chunks semánticos con metadatos enriquecidos.\"\"\"\n    try:\n        # Cargar PDF\n        loader = PyPDFLoader(str(pdf_path))\n        pages  = loader.load()\n        \n        # Concatenar texto del documento completo\n        full_text = ' '.join([p.page_content for p in pages])\n        \n        # Aplicar chunking semántico\n        raw_chunks = chunker.create_documents([full_text])\n        \n        # Enriquecer metadatos de cada chunk\n        doc_id = pdf_path.stem  # nombre del archivo sin extensión\n        enriched_chunks = []\n        for i, chunk in enumerate(raw_chunks):\n            chunk.metadata = {\n                'doc_id'    : doc_id,\n                'source'    : str(pdf_path),\n                'chunk_id'  : f'{doc_id}_chunk_{i:03d}',\n                'chunk_idx' : i,\n                'total_chunks': len(raw_chunks),\n                'page_count': len(pages),\n                'char_count': len(chunk.page_content)\n            }\n            enriched_chunks.append(chunk)\n        \n        return enriched_chunks\n    except Exception as e:\n        print(f'⚠️  Error procesando {pdf_path.name}: {e}')\n        return []\n\n\n# ── Procesar todos los PDFs ───────────────────────────────────────────────\nall_chunks   = []\nchunk_stats  = []\n\nprint(f'Procesando {len(pdfs)} documentos con SemanticChunker...')\nfor i, pdf in enumerate(pdfs):\n    chunks = load_and_chunk_document(pdf, semantic_chunker)\n    chunk_stats.append({'doc': pdf.name, 'n_chunks': len(chunks)})\n    all_chunks.extend(chunks)\n    if (i+1) % 10 == 0:\n        print(f'  [{i+1}/{len(pdfs)}] {pdf.name} → {len(chunks)} chunks')\n\nprint(f'\\n✅ Procesamiento completado')\nprint(f'   Total de chunks semánticos: {len(all_chunks)}')\nprint(f'   Promedio de chunks por doc: {len(all_chunks)/len(pdfs):.1f}')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "chunk_analysis",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Análisis de los chunks ────────────────────────────────────────────────\nimport statistics\n\nchunk_lengths = [len(c.page_content) for c in all_chunks]\n\nprint('📊 Estadísticas de chunks semánticos:')\nprint(f'   Mínimo:  {min(chunk_lengths):,} chars')\nprint(f'   Máximo:  {max(chunk_lengths):,} chars')\nprint(f'   Promedio: {statistics.mean(chunk_lengths):,.0f} chars')\nprint(f'   Mediana:  {statistics.median(chunk_lengths):,.0f} chars')\nprint(f'   Desv. estándar: {statistics.stdev(chunk_lengths):,.0f} chars')\n\nprint('\\n📄 Ejemplo de chunk semántico:')\nprint('-' * 60)\nexample = all_chunks[0]\nprint(f'Doc ID:    {example.metadata[\"doc_id\"]}')\nprint(f'Chunk ID:  {example.metadata[\"chunk_id\"]}')\nprint(f'Chars:     {example.metadata[\"char_count\"]}')\nprint(f'Texto:     {example.page_content[:300]}...')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_comparison",
+   "metadata": {},
+   "source": "## 5 · Comparación: Fixed-size vs Semántico\n\nDemostramos la diferencia entre el chunking de tamaño fijo (P1) y el chunking semántico (P2)."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "comparison",
+   "metadata": {},
+   "outputs": [],
+   "source": "from langchain.text_splitter import RecursiveCharacterTextSplitter\n\n# ── Chunking fijo (Práctica 1) ────────────────────────────────────────────\nfixed_splitter = RecursiveCharacterTextSplitter(\n    chunk_size=1000,\n    chunk_overlap=200\n)\n\n# Usar el primer PDF como ejemplo\ntest_pdf = pdfs[0]\nloader   = PyPDFLoader(str(test_pdf))\npages    = loader.load()\nfull_text = ' '.join([p.page_content for p in pages])\n\n# Fixed chunks\nfixed_chunks = fixed_splitter.create_documents([full_text])\n\n# Semantic chunks\nsemantic_chunks_test = semantic_chunker.create_documents([full_text])\n\nprint(f'📄 Documento: {test_pdf.name}')\nprint(f'   Texto total: {len(full_text):,} caracteres')\nprint()\nprint('⚡ Chunking de tamaño fijo (P1):')\nprint(f'   Número de chunks: {len(fixed_chunks)}')\nprint(f'   Tamaño promedio: {sum(len(c.page_content) for c in fixed_chunks)/len(fixed_chunks):.0f} chars')\nprint()\nprint('🧠 Chunking semántico (P2):')\nprint(f'   Número de chunks: {len(semantic_chunks_test)}')\nprint(f'   Tamaño promedio: {sum(len(c.page_content) for c in semantic_chunks_test)/len(semantic_chunks_test):.0f} chars')\nprint()\nprint('💡 Ventaja del chunking semántico:')\nprint('   • Preserva unidades temáticas completas')\nprint('   • Evita cortar ideas a la mitad')\nprint('   • Mayor coherencia en la recuperación')\nprint('   • Mejor relevancia en las respuestas RAG')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_faiss",
+   "metadata": {},
+   "source": "## 6 · Indexar en FAISS"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "build_faiss",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Construir índice FAISS con chunks semánticos ──────────────────────────\n# Se procesan en lotes para evitar límites de tasa de la API\nBATCH_SIZE = 50\nfaiss_index = None\n\nprint(f'Construyendo índice FAISS con {len(all_chunks)} chunks semánticos...')\nfor i in range(0, len(all_chunks), BATCH_SIZE):\n    batch = all_chunks[i : i + BATCH_SIZE]\n    if faiss_index is None:\n        faiss_index = FAISS.from_documents(batch, embeddings_model)\n    else:\n        faiss_index.add_documents(batch)\n    \n    progress = min(i + BATCH_SIZE, len(all_chunks))\n    print(f'  [{progress}/{len(all_chunks)}] vectores indexados')\n    time.sleep(1)  # respetar rate limit\n\nprint(f'\\n✅ Índice FAISS construido')\nprint(f'   Vectores totales: {faiss_index.index.ntotal}')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "save_faiss",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Guardar índice FAISS ──────────────────────────────────────────────────\nFAISS_PATH = INDEX_DIR / 'faiss_semantic'\nfaiss_index.save_local(str(FAISS_PATH))\nprint(f'✅ Índice FAISS guardado en: {FAISS_PATH}')\n\n# También guardar los chunks como pickle para referencia\nwith open(INDEX_DIR / 'semantic_chunks.pkl', 'wb') as f:\n    pickle.dump(all_chunks, f)\nprint(f'✅ Chunks semánticos guardados: {INDEX_DIR}/semantic_chunks.pkl')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "test_retrieval",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Test de recuperación ──────────────────────────────────────────────────\ntest_query = 'What are the genetic mutations associated with breast cancer?'\nresults = faiss_index.similarity_search_with_score(test_query, k=3)\n\nprint(f'🔍 Query: \"{test_query}\"\\n')\nfor i, (doc, score) in enumerate(results):\n    print(f'Resultado {i+1} (score={score:.4f}):')\n    print(f'  Doc: {doc.metadata[\"doc_id\"]}')\n    print(f'  Chunk: {doc.metadata[\"chunk_id\"]}')\n    print(f'  Texto: {doc.page_content[:200]}...')\n    print()"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_summary",
+   "metadata": {},
+   "source": "## Resumen\n\n| Métrica | Valor |\n|---|---|\n| Documentos procesados | 50 |\n| Chunking | SemanticChunker (percentile 95) |\n| Modelo de embeddings | text-embedding-004 |\n| Índice | FAISS (cosine similarity) |\n| Uso en el sistema | Base para recuperación MMR y KG-RAG |\n\n**Próximos pasos:** El índice FAISS construido aquí será utilizado en:\n- `P2_02_query_transformation.ipynb` → para probar HyDE y Query Decomposition\n- `P2_03_advanced_retrieval.ipynb` → para búsqueda MMR\n- `RAG_KnowledgeGraph_Completo.ipynb` → sistema integrado completo"
+  }
+ ]
+}

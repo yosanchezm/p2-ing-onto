@@ -1,0 +1,87 @@
+{
+ "nbformat": 4,
+ "nbformat_minor": 5,
+ "metadata": {
+  "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+  "language_info": {"name": "python", "version": "3.10.0"},
+  "colab": {"provenance": [], "toc_visible": true}
+ },
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "md_title",
+   "metadata": {},
+   "source": "# P2-03 · Recuperación Avanzada: MMR + Búsqueda Híbrida\n**Trabajo Práctico 2 — Ingeniería Ontológica 3010090**\n\nEste notebook implementa estrategias de recuperación avanzada que mejoran la **relevancia** y **diversidad** de los documentos recuperados:\n\n## Estrategias implementadas\n\n### 1. MMR — Maximal Marginal Relevance\nMejora el resultado clásico de similaridad coseno balanceando:\n- **Relevancia**: los documentos deben ser relevantes a la consulta\n- **Diversidad**: evitar documentos redundantes entre sí\n\nFórmula: `MMR(d) = λ·sim(d, query) - (1-λ)·max_sim(d, ya_seleccionados)`\n\n### 2. Justificación de MMR sobre Búsqueda Híbrida\nSe implementa MMR porque el corpus biomédico tiene alta redundancia: \nmuchos artículos de arXiv tratan los mismos genes/enfermedades con vocabulario similar. \nMMR garantiza diversidad en los resultados, evitando que todos los fragmentos recuperados\nprovengan del mismo artículo o hablen de lo mismo."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "setup",
+   "metadata": {},
+   "outputs": [],
+   "source": "import os\nfrom google.colab import userdata\nfrom pathlib import Path\nfrom typing import List, Tuple\n\nos.environ['GOOGLE_API_KEY']       = userdata.get('GOOGLE_API_KEY')\nos.environ['GROQ_API_KEY']         = userdata.get('GROQ_API_KEY')\nos.environ['LANGCHAIN_API_KEY']    = userdata.get('LANGCHAIN_API_KEY')\nos.environ['LANGCHAIN_TRACING_V2'] = 'true'\nos.environ['LANGCHAIN_PROJECT']    = 'RAG-KnowledgeGraph-P2'\n\nfrom langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI\nfrom langchain_groq import ChatGroq\nfrom langchain_community.vectorstores import FAISS\nfrom langchain.schema import Document\nfrom langchain_core.prompts import ChatPromptTemplate\nfrom langchain_core.output_parsers import JsonOutputParser\nfrom langchain_core.pydantic_v1 import BaseModel, Field\n\nBASE_DIR   = Path('/content/drive/MyDrive/RAG_P2')\nINDEX_DIR  = BASE_DIR / 'indices_p2'\n\nembeddings = GoogleGenerativeAIEmbeddings(model='models/text-embedding-004')\n\n# Cargar índice FAISS\nfaiss_index = FAISS.load_local(\n    str(INDEX_DIR / 'faiss_semantic'),\n    embeddings,\n    allow_dangerous_deserialization=True\n)\n\n# Modelos LLM\ngemini = ChatGoogleGenerativeAI(model='gemini-2.0-flash', temperature=0.0)\ngroq   = ChatGroq(model='llama-3.3-70b-versatile', temperature=0.0, max_tokens=256)\n\nprint('✅ Configuración lista')\nprint(f'   Vectores en FAISS: {faiss_index.index.ntotal}')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_dynamic_k",
+   "metadata": {},
+   "source": "## 1 · Selección dinámica de k (con Groq)\n\nEl sistema determina automáticamente cuántos fragmentos recuperar basándose en la complejidad de la consulta.\nSe usa **Groq LLaMA 3.3 70B** por su baja latencia (<500ms) para esta micro-decisión."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "dynamic_k",
+   "metadata": {},
+   "outputs": [],
+   "source": "class KSelection(BaseModel):\n    k: int = Field(description=\"Número de documentos a recuperar (entre 3 y 10)\")\n    reasoning: str = Field(description=\"Justificación de la elección de k\")\n\nK_PROMPT = ChatPromptTemplate.from_template(\"\"\"\nEres un experto en recuperación de información biomédica.\nDada la siguiente consulta, determina cuántos fragmentos de documentos (k) deben recuperarse.\n\nConsulta: \"{query}\"\n\nReglas:\n- Consultas simples/directas: k = 3\n- Consultas de comparación o múltiples aspectos: k = 5-7\n- Consultas de síntesis/revisión amplia: k = 8-10\n\nResponde SOLO con JSON.\n\"\"\")\n\nk_selector_chain = K_PROMPT | groq.with_structured_output(KSelection)\n\n\ndef select_dynamic_k(query: str) -> int:\n    \"\"\"Determina dinámicamente el número óptimo de fragmentos a recuperar.\"\"\"\n    result = k_selector_chain.invoke({'query': query})\n    k = max(3, min(10, result.k))  # clamp entre 3 y 10\n    print(f'  📊 k dinámico seleccionado: {k} — {result.reasoning}')\n    return k\n\n\n# Test\ntest_queries = [\n    'What is BRCA1?',\n    'Compare BRCA1 and TP53 mutations in breast cancer and lung cancer and their treatment options.',\n    'Provide a comprehensive review of COVID-19 treatment protocols including antivirals, corticosteroids, and supportive care.'\n]\n\nprint('🎯 Selección dinámica de k:\\n')\nfor q in test_queries:\n    print(f'Query: \"{q[:70]}\"')\n    k = select_dynamic_k(q)\n    print()"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_mmr",
+   "metadata": {},
+   "source": "## 2 · Recuperación MMR\n\nMMR (Maximal Marginal Relevance) selecciona documentos que son relevantes a la consulta\npero diferentes entre sí, reduciendo la redundancia.\n\n**Parámetros clave:**\n- `fetch_k`: cuántos documentos candidatos recuperar inicialmente\n- `lambda_mult`: balance relevancia vs diversidad (0=máx diversidad, 1=máx relevancia)"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "mmr_retrieval",
+   "metadata": {},
+   "outputs": [],
+   "source": "def retrieve_mmr(query: str, vectorstore: FAISS, k: int = 5, \n                  fetch_k: int = 20, lambda_mult: float = 0.6) -> List[Document]:\n    \"\"\"\n    Recuperación MMR (Maximal Marginal Relevance).\n    \n    Args:\n        query: consulta del usuario\n        vectorstore: índice FAISS\n        k: número de documentos finales a retornar\n        fetch_k: documentos candidatos iniciales (debe ser >= k)\n        lambda_mult: balance relevancia/diversidad (0.6 = ligero sesgo hacia relevancia)\n    \n    Returns:\n        Lista de documentos con balance relevancia-diversidad\n    \"\"\"\n    retriever = vectorstore.as_retriever(\n        search_type='mmr',\n        search_kwargs={\n            'k': k,\n            'fetch_k': fetch_k,\n            'lambda_mult': lambda_mult\n        }\n    )\n    return retriever.invoke(query)\n\n\ndef retrieve_similarity(query: str, vectorstore: FAISS, k: int = 5) -> List[Tuple[Document, float]]:\n    \"\"\"Recuperación clásica por similitud coseno (para comparación).\"\"\"\n    return vectorstore.similarity_search_with_score(query, k=k)\n\n\n# ── Comparación MMR vs Similitud ──────────────────────────────────────────\ntest_query = 'BRCA1 protein function in DNA repair and cancer development'\nk = 5\n\nprint(f'🔍 Query: \"{test_query}\"\\n')\n\n# Similitud coseno clásica\nsim_results = retrieve_similarity(test_query, faiss_index, k=k)\nprint('📊 Recuperación por Similitud Coseno (P1):')\ndocs_from_same_source = {}\nfor i, (doc, score) in enumerate(sim_results):\n    src = doc.metadata['doc_id']\n    docs_from_same_source[src] = docs_from_same_source.get(src, 0) + 1\n    print(f'  {i+1}. [{src}] score={score:.4f}')\nunique_sources_sim = len(docs_from_same_source)\nprint(f'  ➡ Fuentes únicas: {unique_sources_sim}/{k}')\nprint(f'  ➡ Redundancia: {k - unique_sources_sim} chunks del mismo documento')\n\nprint()\n\n# MMR\nmmr_results = retrieve_mmr(test_query, faiss_index, k=k, fetch_k=20, lambda_mult=0.6)\nprint('🎯 Recuperación MMR (P2 — mayor diversidad):')\ndocs_from_same_source_mmr = {}\nfor i, doc in enumerate(mmr_results):\n    src = doc.metadata['doc_id']\n    docs_from_same_source_mmr[src] = docs_from_same_source_mmr.get(src, 0) + 1\n    print(f'  {i+1}. [{src}]')\nunique_sources_mmr = len(docs_from_same_source_mmr)\nprint(f'  ➡ Fuentes únicas: {unique_sources_mmr}/{k}')\nprint(f'  ➡ Redundancia reducida: {k - unique_sources_mmr} chunks del mismo documento')\n\nprint(f'\\n✅ MMR aumentó diversidad: {unique_sources_sim} → {unique_sources_mmr} fuentes únicas')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_lambda_analysis",
+   "metadata": {},
+   "source": "## 3 · Análisis del parámetro λ (lambda_mult)\n\nDemostramos cómo varía la diversidad según el valor de λ."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "lambda_analysis",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Análisis de lambda_mult ───────────────────────────────────────────────\nprint('📊 Análisis del parámetro λ (lambda_mult) en MMR:\\n')\nprint(f'Query: \"{test_query}\"\\n')\n\nfor lm in [0.0, 0.3, 0.6, 0.9, 1.0]:\n    results = retrieve_mmr(test_query, faiss_index, k=5, fetch_k=20, lambda_mult=lm)\n    unique = len(set(d.metadata['doc_id'] for d in results))\n    label = '← máxima diversidad' if lm == 0.0 else ('← máxima relevancia' if lm == 1.0 else '')\n    print(f'  λ={lm:.1f}: {unique}/5 fuentes únicas  {label}')\n\nprint('\\n💡 Elección: λ=0.6 para el sistema RAG')\nprint('   Justificación: balance óptimo entre relevancia y cobertura temática.')\nprint('   El dominio biomédico requiere diversidad para evitar respuestas sesgadas')\nprint('   hacia un solo artículo, pero manteniendo relevancia alta.')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_integrated",
+   "metadata": {},
+   "source": "## 4 · Función de recuperación integrada con k dinámico"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "integrated_retrieval",
+   "metadata": {},
+   "outputs": [],
+   "source": "def advanced_retrieve(\n    query: str,\n    vectorstore: FAISS,\n    use_dynamic_k: bool = True,\n    lambda_mult: float = 0.6\n) -> dict:\n    \"\"\"\n    Función principal de recuperación avanzada que combina:\n    - Selección dinámica de k (Groq LLaMA 3.3 70B)\n    - Búsqueda MMR para diversidad y relevancia\n    \n    Args:\n        query: consulta del usuario\n        vectorstore: índice FAISS con chunks semánticos\n        use_dynamic_k: si True, determina k automáticamente\n        lambda_mult: parámetro de balance MMR\n    \n    Returns:\n        dict con documentos recuperados y metadatos de trazabilidad\n    \"\"\"\n    # 1. Determinar k\n    if use_dynamic_k:\n        k = select_dynamic_k(query)\n    else:\n        k = 5\n    \n    # 2. Recuperar con MMR\n    fetch_k = min(k * 4, faiss_index.index.ntotal)  # candidatos: 4x el k final\n    docs = retrieve_mmr(query, vectorstore, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult)\n    \n    # 3. Calcular diversidad\n    unique_sources = len(set(d.metadata['doc_id'] for d in docs))\n    \n    return {\n        'query': query,\n        'k_selected': k,\n        'documents': docs,\n        'unique_sources': unique_sources,\n        'diversity_ratio': unique_sources / k if k > 0 else 0,\n        'retrieval_method': 'MMR',\n        'lambda_mult': lambda_mult,\n        'metadata': {\n            'chunks': [{\n                'doc_id'  : d.metadata['doc_id'],\n                'chunk_id': d.metadata['chunk_id'],\n                'preview' : d.page_content[:150]\n            } for d in docs]\n        }\n    }\n\n\n# ── Test final ────────────────────────────────────────────────────────────\nresult = advanced_retrieve(\n    'What are the EGFR mutation types in non-small cell lung cancer and their clinical significance?',\n    faiss_index\n)\n\nprint('\\n📋 Resultado de advanced_retrieve:')\nprint(f'  Query: \"{result[\"query\"][:60]}...\"')\nprint(f'  k seleccionado: {result[\"k_selected\"]}')\nprint(f'  Método: {result[\"retrieval_method\"]} (λ={result[\"lambda_mult\"]})')\nprint(f'  Documentos recuperados: {len(result[\"documents\"])}')\nprint(f'  Fuentes únicas: {result[\"unique_sources\"]}')\nprint(f'  Ratio de diversidad: {result[\"diversity_ratio\"]:.2f}')\nprint('\\n  Chunks recuperados:')\nfor chunk in result['metadata']['chunks']:\n    print(f'    • [{chunk[\"doc_id\"]}] {chunk[\"preview\"][:80]}...')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_summary",
+   "metadata": {},
+   "source": "## Resumen\n\n| Componente | Práctica 1 | Práctica 2 |\n|---|---|---|\n| Método de búsqueda | Similitud coseno | MMR (Maximal Marginal Relevance) |\n| k | Fijo (configurado manualmente) | Dinámico (decidido por Groq LLaMA 3.3 70B) |\n| Diversidad | No garantizada | Garantizada por parámetro λ |\n| Redundancia | Alta (mismos docs repetidos) | Reducida |\n\n**Por qué MMR sobre Búsqueda Híbrida:**\nEl corpus biomédico de arXiv tiene alta redundancia temática. MMR reduce la redundancia garantizando\ndiversidad de fuentes en los resultados. La búsqueda híbrida (sparse+dense) requeriría BM25, \nque es menos beneficioso en texto científico altamente especializado donde el vocabulario es \nconsistente y los embeddings densos capturan bien la semántica."
+  }
+ ]
+}

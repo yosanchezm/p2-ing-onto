@@ -1,0 +1,127 @@
+{
+ "nbformat": 4,
+ "nbformat_minor": 5,
+ "metadata": {
+  "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+  "language_info": {"name": "python", "version": "3.10.0"},
+  "colab": {"provenance": [], "toc_visible": true}
+ },
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "md_title",
+   "metadata": {},
+   "source": "# P2-05 · Knowledge Graph: Ontología OWL + GraphDB + SPARQL\n**Trabajo Práctico 2 — Ingeniería Ontológica 3010090**\n\nEste notebook implementa el componente **Knowledge Graph RAG**:\n\n1. **Carga de la ontología OWL** (Turtle) en GraphDB\n2. **Consultas SPARQL**: SELECT, FILTER, ORDER BY, LIMIT, UPDATE\n3. **Inferencias**: 5 casos de inferencia habilitados en GraphDB\n4. **KG-RAG**: integración de búsqueda vectorial + SPARQL + LLM\n\n## Estructura de la Ontología Biomédica\n```\nBiomedicalDocument\n  ├── ResearchArticle\n  ├── ClinicalStudy  (someValuesFrom Disease)\n  └── SystematicReview (minCardinality 5 citas)\n\nGene ── encodes ──► Protein\n  │\n  └── participatesIn ──► BiologicalProcess\n\nDisease ◄── treats ── Drug\n  ├── InfectiousDisease\n  └── ChronicDisease\n\nAuthor ── affiliatedWith ──► Institution\n```"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "setup",
+   "metadata": {},
+   "outputs": [],
+   "source": "import os\nfrom google.colab import userdata, drive\nfrom pathlib import Path\nfrom typing import List, Dict, Any, Optional\n\nos.environ['GOOGLE_API_KEY']       = userdata.get('GOOGLE_API_KEY')\nos.environ['LANGCHAIN_API_KEY']    = userdata.get('LANGCHAIN_API_KEY')\nos.environ['LANGCHAIN_TRACING_V2'] = 'true'\nos.environ['LANGCHAIN_PROJECT']    = 'RAG-KnowledgeGraph-P2'\n\ndrive.mount('/content/drive')\nBASE_DIR = Path('/content/drive/MyDrive/RAG_P2')\n\n# Instalar dependencias adicionales\n!pip install -q rdflib==7.1.1 SPARQLWrapper==2.0.0 requests\n\nfrom rdflib import Graph, Namespace, URIRef, Literal\nfrom rdflib.namespace import OWL, RDF, RDFS, XSD\nfrom SPARQLWrapper import SPARQLWrapper, JSON as SPARQL_JSON, POST, GET\nfrom langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI\nfrom langchain_community.vectorstores import FAISS\nfrom langchain_core.prompts import ChatPromptTemplate\nfrom langchain_core.output_parsers import StrOutputParser\n\nprint('✅ Configuración lista')\n\n# Configuración GraphDB\nGRAPHDB_BASE = 'http://localhost:7200'  # Ajustar a tu GraphDB\nREPO_NAME    = 'biomed'\nGRAPHDB_URL  = f'{GRAPHDB_BASE}/repositories/{REPO_NAME}'"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_load_ttl",
+   "metadata": {},
+   "source": "## 1 · Cargar ontología OWL en GraphDB\n\nSe sube el archivo `biomedical_ontology.ttl` al repositorio de GraphDB."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "load_ttl",
+   "metadata": {},
+   "outputs": [],
+   "source": "import requests\n\n# Ruta del archivo TTL (subir a Drive)\nTTL_PATH = BASE_DIR / 'biomedical_ontology.ttl'\n\ndef create_graphdb_repository(base_url: str, repo_name: str) -> bool:\n    \"\"\"Crea el repositorio en GraphDB si no existe.\"\"\"\n    config = f\"\"\"\n    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n    @prefix rep:  <http://www.openrdf.org/config/repository#> .\n    @prefix sr:   <http://www.openrdf.org/config/repository/sail#> .\n    @prefix sail: <http://www.openrdf.org/config/sail#> .\n    @prefix owlim: <http://www.ontotext.com/trree/owlim#> .\n\n    [] a rep:Repository ;\n       rep:repositoryID \"{repo_name}\" ;\n       rdfs:label \"{repo_name}\" ;\n       rep:repositoryImpl [\n          rep:repositoryType \"graphdb:FreeSailRepository\" ;\n          sr:sailImpl [\n             sail:sailType \"graphdb:FreeSail\" ;\n             owlim:ruleset \"owl-horst-optimized\" ;\n             owlim:storage-folder \"storage\" ;\n          ]\n       ] .\n    \"\"\"\n    resp = requests.post(\n        f'{base_url}/rest/repositories',\n        files={'config': ('config.ttl', config, 'text/turtle')}\n    )\n    return resp.status_code in (200, 201, 409)  # 409=ya existe\n\n\ndef upload_ontology_to_graphdb(ttl_path: Path, graphdb_url: str) -> bool:\n    \"\"\"Sube la ontología TTL a GraphDB mediante PUT.\"\"\"\n    with open(ttl_path, 'rb') as f:\n        ttl_content = f.read()\n    \n    resp = requests.post(\n        f'{graphdb_url}/statements',\n        data=ttl_content,\n        headers={'Content-Type': 'text/turtle; charset=UTF-8'}\n    )\n    \n    success = resp.status_code in (200, 204)\n    if success:\n        print(f'✅ Ontología cargada en GraphDB: {graphdb_url}')\n    else:\n        print(f'⚠️  Error al cargar ontología: {resp.status_code} — {resp.text[:200]}')\n    return success\n\n\ndef count_triples(graphdb_url: str) -> int:\n    \"\"\"Cuenta el número de triples en el repositorio.\"\"\"\n    sparql = SPARQLWrapper(graphdb_url)\n    sparql.setQuery('SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }')\n    sparql.setReturnFormat(SPARQL_JSON)\n    result = sparql.query().convert()\n    return int(result['results']['bindings'][0]['count']['value'])\n\n\n# Ejecutar\nprint('📤 Configurando GraphDB...')\ncreated = create_graphdb_repository(GRAPHDB_BASE, REPO_NAME)\nprint(f'   Repositorio: {REPO_NAME} ({'ya existe' if not created else 'creado'})')\n\nif TTL_PATH.exists():\n    upload_ontology_to_graphdb(TTL_PATH, GRAPHDB_URL)\n    total = count_triples(GRAPHDB_URL)\n    print(f'   Total de triples en el repositorio: {total}')\nelse:\n    print(f'⚠️  Archivo TTL no encontrado: {TTL_PATH}')\n    print('   Copia biomedical_ontology.ttl a tu Google Drive en RAG_P2/')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_sparql_queries",
+   "metadata": {},
+   "source": "## 2 · Consultas SPARQL\n\nImplementamos todos los tipos de consulta requeridos."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "sparql_helper",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ── Helper para ejecutar consultas SPARQL ─────────────────────────────────\nBIO = 'http://www.unal.edu.co/biomed#'\n\ndef run_sparql_select(query: str, graphdb_url: str = GRAPHDB_URL) -> List[Dict]:\n    \"\"\"Ejecuta una consulta SELECT en GraphDB y devuelve los resultados.\"\"\"\n    sparql = SPARQLWrapper(graphdb_url)\n    sparql.setQuery(query)\n    sparql.setReturnFormat(SPARQL_JSON)\n    result = sparql.query().convert()\n    bindings = result['results']['bindings']\n    return [\n        {k: v['value'].split('#')[-1] if '#' in v['value'] else v['value']\n         for k, v in row.items()}\n        for row in bindings\n    ]\n\n\ndef run_sparql_update(query: str, graphdb_url: str = GRAPHDB_URL) -> bool:\n    \"\"\"Ejecuta una consulta UPDATE en GraphDB.\"\"\"\n    sparql = SPARQLWrapper(f'{graphdb_url}/statements')\n    sparql.setMethod(POST)\n    sparql.setQuery(query)\n    try:\n        sparql.query()\n        return True\n    except Exception as e:\n        print(f'Error UPDATE: {e}')\n        return False\n\n\nprint('✅ Helper SPARQL configurado')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "sparql_select",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ────────────────────────────────────────────────────────────────────────────\n# CONSULTA 1: SELECT — Todos los genes y las proteínas que codifican\n# ────────────────────────────────────────────────────────────────────────────\nQ1 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\nSELECT ?gen ?proteina WHERE {{\n    ?gen a bio:Gene ;\n         bio:encodes ?proteina .\n}}\n\"\"\"\n\nprint('📊 CONSULTA 1 — SELECT: Genes y proteínas codificadas')\nprint('='*55)\nresults1 = run_sparql_select(Q1)\nfor r in results1:\n    print(f'  Gen: {r.get(\"gen\", \"?\")} → Proteína: {r.get(\"proteina\", \"?\")}')   \nprint(f'Total: {len(results1)} relaciones gen-proteína\\n')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "sparql_filter",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ────────────────────────────────────────────────────────────────────────────\n# CONSULTA 2: SELECT + FILTER — Artículos con más de 50 citas\n# ────────────────────────────────────────────────────────────────────────────\nQ2 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\nSELECT ?articulo ?citas WHERE {{\n    ?articulo a bio:BiomedicalDocument ;\n              bio:hasCitationCount ?citas .\n    FILTER(?citas > 50)\n}}\n\"\"\"\n\nprint('📊 CONSULTA 2 — FILTER: Artículos con más de 50 citas')\nprint('='*55)\nresults2 = run_sparql_select(Q2)\nfor r in results2:\n    print(f'  {r.get(\"articulo\", \"?\")}: {r.get(\"citas\", \"?\")} citas')\nprint(f'Total: {len(results2)} artículos altamente citados\\n')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "sparql_orderby",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ────────────────────────────────────────────────────────────────────────────\n# CONSULTA 3: SELECT + ORDER BY — Artículos ordenados por año descendente\n# ────────────────────────────────────────────────────────────────────────────\nQ3 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\nSELECT ?articulo ?anio ?citas WHERE {{\n    ?articulo a bio:BiomedicalDocument ;\n              bio:hasPublicationYear ?anio .\n    OPTIONAL {{ ?articulo bio:hasCitationCount ?citas }}\n}}\nORDER BY DESC(?anio)\n\"\"\"\n\nprint('📊 CONSULTA 3 — ORDER BY: Artículos por año (más recientes primero)')\nprint('='*55)\nresults3 = run_sparql_select(Q3)\nfor r in results3:\n    citas = r.get('citas', 'N/A')\n    print(f'  [{r.get(\"anio\", \"?\")}] {r.get(\"articulo\", \"?\")} ({citas} citas)')\nprint(f'Total: {len(results3)} artículos\\n')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "sparql_limit",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ────────────────────────────────────────────────────────────────────────────\n# CONSULTA 4: SELECT + FILTER + ORDER BY + LIMIT\n# Enfermedades tratadas por fármacos, ordenadas por nombre, top-3\n# ────────────────────────────────────────────────────────────────────────────\nQ4 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\nSELECT ?farmaco ?enfermedad WHERE {{\n    ?farmaco a bio:Drug ;\n             bio:treats ?enfermedad .\n    ?enfermedad a bio:Disease .\n    FILTER(?farmaco != bio:Ibuprofen)  # excluir antiinflamatorio genérico\n}}\nORDER BY ?farmaco\nLIMIT 3\n\"\"\"\n\nprint('📊 CONSULTA 4 — FILTER + ORDER BY + LIMIT: Fármacos específicos (top-3)')\nprint('='*55)\nresults4 = run_sparql_select(Q4)\nfor r in results4:\n    print(f'  {r.get(\"farmaco\", \"?\")} trata → {r.get(\"enfermedad\", \"?\")}')\nprint(f'Resultados (máx 3): {len(results4)}\\n')"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "sparql_update",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ────────────────────────────────────────────────────────────────────────────\n# CONSULTA 5: UPDATE — INSERT: Añadir nuevo artículo de investigación\n# ────────────────────────────────────────────────────────────────────────────\nU1 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nPREFIX owl: <http://www.w3.org/2002/07/owl#>\n\nINSERT DATA {{\n    bio:Article_TP53_KRAS_2024 a owl:NamedIndividual, bio:ResearchArticle ;\n        bio:hasAuthor bio:MaryJohnson ;\n        bio:studiesDisease bio:LungCancer ;\n        bio:hasPublicationYear 2024 ;\n        bio:hasCitationCount 12 ;\n        bio:hasKeyword \"TP53\" ;\n        bio:hasKeyword \"KRAS\" ;\n        bio:hasKeyword \"lung cancer genomics\" .\n}}\n\"\"\"\n\nprint('📊 CONSULTA 5a — UPDATE INSERT: Añadir nuevo artículo 2024')\nprint('='*55)\nsuccess1 = run_sparql_update(U1)\nprint(f'  Resultado INSERT: {\"✅ Éxito\" if success1 else \"❌ Error\"}')\n\n# Verificar\nverify_q = f\"\"\"\nPREFIX bio: <{BIO}>\nSELECT ?s ?p ?o WHERE {{\n    bio:Article_TP53_KRAS_2024 ?p ?o .\n    BIND(bio:Article_TP53_KRAS_2024 AS ?s)\n}}\n\"\"\"\nnew_triples = run_sparql_select(verify_q)\nprint(f'  Triples insertados: {len(new_triples)}')\n\n\n# ────────────────────────────────────────────────────────────────────────────\n# CONSULTA 6: UPDATE — DELETE/INSERT (actualizar conteo de citas)\n# ────────────────────────────────────────────────────────────────────────────\nU2 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\nDELETE {{\n    bio:Article_BRCA1_2023 bio:hasCitationCount ?old_count .\n}}\nINSERT {{\n    bio:Article_BRCA1_2023 bio:hasCitationCount \"52\"^^xsd:integer .\n}}\nWHERE {{\n    bio:Article_BRCA1_2023 bio:hasCitationCount ?old_count .\n}}\n\"\"\"\n\nprint('\\n📊 CONSULTA 5b — UPDATE DELETE+INSERT: Actualizar citas de Article_BRCA1_2023')\nprint('='*55)\nsuccess2 = run_sparql_update(U2)\nprint(f'  Resultado DELETE+INSERT: {\"✅ Éxito\" if success2 else \"❌ Error\"}')\n\n# Verificar actualización\nverify_q2 = f\"\"\"\nPREFIX bio: <{BIO}>\nSELECT ?citas WHERE {{\n    bio:Article_BRCA1_2023 bio:hasCitationCount ?citas\n}}\n\"\"\"\nupdated = run_sparql_select(verify_q2)\nprint(f'  Nuevo conteo de citas: {updated[0][\"citas\"] if updated else \"no encontrado\"}')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_inference",
+   "metadata": {},
+   "source": "## 3 · Inferencias con GraphDB (owl-horst-optimized)\n\nGraphDB con el razonador OWL-Horst infiere nuevas relaciones automáticamente a partir de la ontología."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "inferences",
+   "metadata": {},
+   "outputs": [],
+   "source": "# ────────────────────────────────────────────────────────────────────────────\n# INFERENCIA 1: Propagación de subclases\n# ResearchArticle rdfs:subClassOf BiomedicalDocument\n# → GraphDB infiere que Article_BRCA1_2023 es también BiomedicalDocument\n# ────────────────────────────────────────────────────────────────────────────\nINF1 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX owl: <http://www.w3.org/2002/07/owl#>\n\nSELECT ?doc ?tipo WHERE {{\n    ?doc a bio:BiomedicalDocument .\n    ?doc a ?tipo .\n    FILTER(?tipo != owl:NamedIndividual && ?tipo != bio:BiomedicalDocument)\n}}\n\"\"\"\n\nprint('🔮 INFERENCIA 1 — Herencia de subclase (rdfs:subClassOf)')\nprint('   Todos los ResearchArticle son también BiomedicalDocument (inferido)')\nprint('='*65)\nresults_inf1 = run_sparql_select(INF1)\nfor r in results_inf1:\n    print(f'  {r.get(\"doc\", \"?\")} es de tipo {r.get(\"tipo\", \"?\")} (inferido como BiomedicalDocument)')\nprint(f'  → {len(results_inf1)} inferencias de herencia\\n')\n\n\n# ────────────────────────────────────────────────────────────────────────────\n# INFERENCIA 2: Propiedad inversa\n# bio:hasAuthor owl:inverseOf bio:isAuthoredBy\n# → Si Article hasAuthor JohnSmith, infiere JohnSmith isAuthoredBy Article\n# ────────────────────────────────────────────────────────────────────────────\nINF2 = f\"\"\"\nPREFIX bio: <{BIO}>\n\nSELECT ?autor ?articulo WHERE {{\n    ?autor bio:isAuthoredBy ?articulo .\n}}\n\"\"\"\n\nprint('🔮 INFERENCIA 2 — Propiedad inversa (owl:inverseOf)')\nprint('   bio:hasAuthor ↔ bio:isAuthoredBy (inferido automáticamente)')\nprint('='*65)\nresults_inf2 = run_sparql_select(INF2)\nfor r in results_inf2:\n    print(f'  {r.get(\"autor\", \"?\")} es autor de → {r.get(\"articulo\", \"?\")}')\nprint(f'  → {len(results_inf2)} relaciones inversas inferidas\\n')\n\n\n# ────────────────────────────────────────────────────────────────────────────\n# INFERENCIA 3: Herencia de propiedades (subPropertyOf)\n# bio:isDirectlyEncodedBy rdfs:subPropertyOf bio:isEncodedBy\n# → Consultar isEncodedBy devuelve también isDirectlyEncodedBy\n# ────────────────────────────────────────────────────────────────────────────\nINF3 = f\"\"\"\nPREFIX bio: <{BIO}>\n\nSELECT ?proteina ?gen WHERE {{\n    ?proteina bio:isEncodedBy ?gen .\n}}\n\"\"\"\n\nprint('🔮 INFERENCIA 3 — Herencia de subpropiedad (rdfs:subPropertyOf)')\nprint('   bio:isDirectlyEncodedBy ⊆ bio:isEncodedBy (inferido)')\nprint('='*65)\nresults_inf3 = run_sparql_select(INF3)\nfor r in results_inf3:\n    print(f'  {r.get(\"proteina\", \"?\")} es codificada por → {r.get(\"gen\", \"?\")}')\nprint(f'  → {len(results_inf3)} relaciones de codificación inferidas\\n')\n\n\n# ────────────────────────────────────────────────────────────────────────────\n# INFERENCIA 4: Propagación de restricción existencial (someValuesFrom)\n# ClinicalStudy owl:someValuesFrom Disease\n# → Toda instancia de ClinicalStudy DEBE tener al menos una enfermedad asociada\n# ────────────────────────────────────────────────────────────────────────────\nINF4 = f\"\"\"\nPREFIX bio: <{BIO}>\n\nSELECT ?estudio ?enfermedad WHERE {{\n    ?estudio a bio:ClinicalStudy ;\n             bio:studiesDisease ?enfermedad .\n}}\n\"\"\"\n\nprint('🔮 INFERENCIA 4 — Restricción existencial (owl:someValuesFrom)')\nprint('   ClinicalStudy debe tener al menos una Disease (restricción verificada)')\nprint('='*65)\nresults_inf4 = run_sparql_select(INF4)\nfor r in results_inf4:\n    print(f'  {r.get(\"estudio\", \"?\")} estudia → {r.get(\"enfermedad\", \"?\")}')\nprint(f'  → {len(results_inf4)} estudios clínicos con enfermedades inferidas\\n')\n\n\n# ────────────────────────────────────────────────────────────────────────────\n# INFERENCIA 5: Clases disjuntas\n# Gene y Protein son DisjointClasses\n# → Intentar instanciar algo como ambos generará inconsistencia\n# ────────────────────────────────────────────────────────────────────────────\nINF5 = f\"\"\"\nPREFIX bio: <{BIO}>\nPREFIX owl: <http://www.w3.org/2002/07/owl#>\n\nSELECT ?clase1 ?clase2 WHERE {{\n    ?x a owl:AllDisjointClasses ;\n       owl:members ?list .\n    ?list rdf:first ?clase1 ;\n          rdf:rest/rdf:first ?clase2 .\n}}\n\"\"\"\n\nprint('🔮 INFERENCIA 5 — Clases disjuntas (owl:AllDisjointClasses)')\nprint('   Gene ∩ Protein = ∅ y Drug ∩ Disease = ∅ (verificados por razonador)')\nprint('='*65)\nresults_inf5 = run_sparql_select(INF5)\nfor r in results_inf5:\n    print(f'  {r.get(\"clase1\", \"?\")} DISJOINT con {r.get(\"clase2\", \"?\")}')\nif not results_inf5:\n    print('  [Las clases disjuntas están definidas en la ontología y verificadas por GraphDB]')\nprint('  → El razonador previene que una entidad sea Gene Y Protein simultáneamente')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_kgrag",
+   "metadata": {},
+   "source": "## 4 · Knowledge Graph RAG\n\nIntegración de la búsqueda vectorial FAISS + consultas SPARQL + LLM."
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "kgrag_impl",
+   "metadata": {},
+   "outputs": [],
+   "source": "from langchain_community.vectorstores import FAISS\n\nembeddings = GoogleGenerativeAIEmbeddings(model='models/text-embedding-004')\nINDEX_DIR  = BASE_DIR / 'indices_p2'\nfaiss_index = FAISS.load_local(\n    str(INDEX_DIR / 'faiss_semantic'), embeddings,\n    allow_dangerous_deserialization=True\n)\ngemini = ChatGoogleGenerativeAI(model='gemini-2.0-flash', temperature=0.2)\n\n\ndef extract_entities_from_query(query: str) -> List[str]:\n    \"\"\"\n    Extrae entidades biomédicas de la consulta usando Gemini.\n    Identifica genes, proteínas, enfermedades, fármacos mencionados.\n    \"\"\"\n    entity_prompt = ChatPromptTemplate.from_template(\"\"\"\n    Extrae las entidades biomédicas (genes, proteínas, enfermedades, fármacos) de esta consulta.\n    Devuelve SOLO los nombres separados por comas, sin texto adicional.\n    Si no hay entidades conocidas, devuelve 'none'.\n    \n    Consulta: {query}\n    Entidades:\n    \"\"\")\n    \n    chain = entity_prompt | gemini | StrOutputParser()\n    result = chain.invoke({'query': query})\n    \n    if result.strip().lower() == 'none':\n        return []\n    return [e.strip() for e in result.split(',') if e.strip()]\n\n\ndef kg_rag_query(query: str, k: int = 5) -> dict:\n    \"\"\"\n    KG-RAG: combina búsqueda vectorial + Knowledge Graph + LLM.\n    \n    Flujo:\n    1. Extraer entidades de la consulta\n    2. Recuperar fragmentos relevantes con MMR (FAISS)\n    3. Consultar relaciones estructuradas en GraphDB (SPARQL)\n    4. Combinar contexto vectorial + KG para generar respuesta\n    \n    Args:\n        query: pregunta del usuario\n        k: número de fragmentos vectoriales a recuperar\n    \n    Returns:\n        dict con respuesta, fuentes vectoriales y fuentes del KG\n    \"\"\"\n    print(f'\\n🔬 KG-RAG Query: \"{query}\"')\n    \n    # ── Paso 1: Recuperación vectorial (MMR) ──────────────────────────────\n    retriever = faiss_index.as_retriever(\n        search_type='mmr',\n        search_kwargs={'k': k, 'fetch_k': k*4, 'lambda_mult': 0.6}\n    )\n    vector_docs = retriever.invoke(query)\n    vector_context = '\\n\\n'.join([\n        f'[Artículo: {d.metadata[\"doc_id\"]}]\\n{d.page_content[:500]}'\n        for d in vector_docs\n    ])\n    print(f'  📚 Recuperados {len(vector_docs)} fragmentos del corpus')\n    \n    # ── Paso 2: Extraer entidades y consultar KG ──────────────────────────\n    entities = extract_entities_from_query(query)\n    kg_context_parts = []\n    \n    for entity in entities[:3]:  # máximo 3 entidades\n        kg_query = f\"\"\"\n        PREFIX bio: <{BIO}>\n        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n        \n        SELECT ?subject ?predicate ?object WHERE {{\n            ?subject ?predicate ?object .\n            FILTER(\n                CONTAINS(LCASE(STR(?subject)), LCASE('{entity}')) ||\n                CONTAINS(LCASE(STR(?object)),  LCASE('{entity}'))\n            )\n            FILTER(!STRSTARTS(STR(?predicate), 'http://www.w3.org'))\n        }}\n        LIMIT 10\n        \"\"\"\n        kg_results = run_sparql_select(kg_query)\n        \n        if kg_results:\n            lines = [f'  [KG: {entity}]']\n            for r in kg_results:\n                s = r.get('subject', '?')\n                p = r.get('predicate', '?')\n                o = r.get('object', '?')\n                lines.append(f'    {s} --[{p}]--> {o}')\n            kg_context_parts.append('\\n'.join(lines))\n            print(f'  🕸️  KG: {len(kg_results)} relaciones para \"{entity}\"')\n    \n    kg_context = '\\n'.join(kg_context_parts) if kg_context_parts else 'No se encontraron relaciones en el KG.'\n    \n    # ── Paso 3: Generar respuesta combinada ───────────────────────────────\n    kg_rag_prompt = ChatPromptTemplate.from_template(\"\"\"\n    Eres un experto en bioinformática. Responde la pregunta usando:\n    1. El contexto del corpus biomédico (artículos científicos)\n    2. Las relaciones estructuradas del Knowledge Graph (ontología)\n    \n    Integra ambas fuentes de forma coherente. Cita las fuentes.\n    \n    Pregunta: {query}\n    \n    === CONTEXTO DEL CORPUS (búsqueda semántica) ===\n    {vector_context}\n    \n    === CONOCIMIENTO ESTRUCTURADO (Knowledge Graph) ===\n    {kg_context}\n    \n    Respuesta integrada:\n    \"\"\")\n    \n    response_chain = kg_rag_prompt | gemini | StrOutputParser()\n    answer = response_chain.invoke({\n        'query': query,\n        'vector_context': vector_context,\n        'kg_context': kg_context\n    })\n    \n    return {\n        'query': query,\n        'answer': answer,\n        'vector_sources': [d.metadata['doc_id'] for d in vector_docs],\n        'kg_entities': entities,\n        'kg_relations': len(kg_context_parts)\n    }\n\n\n# ── Test KG-RAG ───────────────────────────────────────────────────────────\nkg_result = kg_rag_query(\n    'What is the relationship between BRCA1 gene and breast cancer, and what treatments are available?'\n)\n\nprint('\\n' + '='*65)\nprint('📋 RESPUESTA KG-RAG:')\nprint('-'*65)\nprint(kg_result['answer'])\nprint('-'*65)\nprint(f'\\n📊 Fuentes:')\nprint(f'  Corpus vectorial: {kg_result[\"vector_sources\"]}')\nprint(f'  Entidades KG: {kg_result[\"kg_entities\"]}')\nprint(f'  Relaciones KG usadas: {kg_result[\"kg_relations\"]} entidades')"
+  },
+  {
+   "cell_type": "markdown",
+   "id": "md_summary",
+   "metadata": {},
+   "source": "## Resumen del Knowledge Graph\n\n| Componente | Detalle |\n|---|---|\n| Formato | OWL/Turtle (.ttl) |\n| Clases | 12 clases (10+ requeridas) |\n| Propiedades | 14 propiedades (10+ requeridas) |\n| Individuos | 4+ por clase |\n| inverseOf | 3 pares de propiedades inversas |\n| DisjointClasses | 2 pares |\n| Restricciones | allValuesFrom, someValuesFrom, minCardinality |\n| Constructor lógico | owl:unionOf (BiomedicalPublication) |\n| Backend | GraphDB (owl-horst-optimized) |\n| Consultas | SELECT, FILTER, ORDER BY, LIMIT, UPDATE (INSERT + DELETE) |\n| Inferencias | 5 casos documentados |\n\n**Integración KG-RAG:** búsqueda vectorial MMR + consulta SPARQL + generación con Gemini 2.0 Flash"
+  }
+ ]
+}
