@@ -141,6 +141,45 @@ def patch_source(source: list[str]) -> list[str]:
     return result_lines
 
 
+def extract_imports_from_colab_cell(source: list[str]) -> list[str] | None:
+    """
+    Si una celda mezcla google.colab con imports de langchain,
+    extrae solo las líneas de import (sin colab, sin rutas, sin os.environ).
+    Retorna lista de líneas o None si no hay imports útiles.
+    """
+    joined = ''.join(source)
+    if 'google.colab' not in joined:
+        return None
+    if 'from langchain' not in joined and 'from langgraph' not in joined and 'from SPARQLWrapper' not in joined:
+        return None
+
+    skip_patterns = [
+        'google.colab', 'drive.mount', 'userdata',
+        'BASE_DIR', 'CORPUS_DIR', 'INDEX_DIR', 'GRAPHDB_BASE',
+        'GRAPHDB_URL', 'REPO_NAME', 'os.environ', 'embeddings =',
+        'gemini =', 'groq =', 'ls_client', 'BIO =', 'TTL_PATH',
+        "print('✅", 'HuggingFaceEmbeddings',
+    ]
+    lines = joined.split('\n')
+    kept = [ln for ln in lines if not any(p in ln for p in skip_patterns)]
+    clean = '\n'.join(kept).strip()
+    if not clean:
+        return None
+    return [ln + '\n' for ln in clean.split('\n') if ln.strip()]
+
+
+MODELS_CELL_SUFFIX = [
+    "\n",
+    "# ── Modelos ──────────────────────────────────────────────────────────────\n",
+    "embeddings = GoogleGenerativeAIEmbeddings(model='models/text-embedding-004', task_type='retrieval_document')\n",
+    "gemini = ChatGoogleGenerativeAI(model='gemini-2.0-flash', temperature=0.2, max_tokens=4096)\n",
+    "groq   = ChatGroq(model='llama-3.3-70b-versatile', temperature=0.0, max_tokens=512)\n",
+    "BIO    = 'http://www.unal.edu.co/biomed#'\n",
+    "\n",
+    "print('✅ Imports y modelos listos')\n",
+]
+
+
 def patch_notebook(nb_path: Path) -> bool:
     """Parchea un notebook en su lugar. Devuelve True si se modificó."""
     with open(nb_path, 'r', encoding='utf-8') as f:
@@ -169,6 +208,18 @@ def patch_notebook(nb_path: Path) -> bool:
                     inserted_config = True
                     modified = True
                     print(f'    [REPLACED] google.colab setup → local_config')
+                    # Si la celda también tenía imports de langchain, preservarlos
+                    extra_imports = extract_imports_from_colab_cell(source)
+                    if extra_imports:
+                        imports_cell = {
+                            "cell_type": "code",
+                            "execution_count": None,
+                            "metadata": {},
+                            "outputs": [],
+                            "source": extra_imports + MODELS_CELL_SUFFIX
+                        }
+                        new_cells.append(imports_cell)
+                        print(f'    [ADDED] imports cell (recuperada del colab cell)')
                 else:
                     # Si hay una segunda celda de colab (ej. solo drive.mount), eliminarla
                     modified = True
