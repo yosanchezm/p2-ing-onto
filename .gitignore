@@ -3,7 +3,7 @@
 venv/
 env/
 .venv/
-
+corpus
 # Python
 __pycache__/
 *.py[cod]
